@@ -242,23 +242,22 @@ export default function Posts() {
                 </Button>
                 {p.status === "draft" && (
                   <>
-                    <Button size="sm" onClick={() => approve(p.id)} className="bg-emerald-500 hover:bg-emerald-400 text-black rounded-none" data-testid={`approve-${p.id}`}>
-                      <CheckCircle2 size={12} className="mr-1.5" /> Approve
+                    <Button size="sm" onClick={() => approve(p.id)} className="bg-emerald-500 hover:bg-emerald-400 text-black rounded-none font-semibold" data-testid={`approve-${p.id}`}>
+                      <CheckCircle2 size={12} className="mr-1.5" /> Approve &amp; auto-schedule
                     </Button>
                     <Button size="sm" variant="outline" onClick={() => reject(p.id)} className="rounded-none border-white/15 hover:text-destructive" data-testid={`reject-${p.id}`}>
                       <XCircle size={12} className="mr-1.5" /> Reject
                     </Button>
                   </>
                 )}
-                {(p.status === "approved" || p.status === "scheduled") && (
-                  <Button size="sm" onClick={() => schedule(p)} className="bg-cyber text-black hover:bg-yellow-400 rounded-none font-semibold" data-testid={`schedule-${p.id}`}>
-                    <CalendarClock size={12} className="mr-1.5" /> {p.status === "scheduled" ? "Reschedule" : "Schedule"}
-                  </Button>
+                {(p.status === "approved" || p.status === "scheduled") && p.scheduled_for && (
+                  <div className="text-[11px] font-mono text-cyber flex items-center gap-1.5" data-testid={`when-${p.id}`}>
+                    <CalendarClock size={12} />
+                    → live on Buffer: {new Date(p.scheduled_for).toLocaleString()}
+                    {p.buffer_post_id && <span className="text-emerald-400">✓</span>}
+                  </div>
                 )}
               </div>
-              {p.scheduled_for && (
-                <div className="mt-2 text-[11px] font-mono text-white/50">→ scheduled_for: {p.scheduled_for}</div>
-              )}
             </Card>
           ))}
         </TabsContent>

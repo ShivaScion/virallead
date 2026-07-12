@@ -46,18 +46,18 @@ export default function Research() {
     <div className="space-y-6" data-testid="research-page">
       <div className="flex items-end justify-between flex-wrap gap-4">
         <div>
-          <div className="text-[10px] font-mono text-cyber tracking-widest">// VIRAL RADAR</div>
+          <div className="text-[10px] font-mono text-cyber tracking-widest">// VIRAL RADAR · AUTONOMOUS</div>
           <h2 className="font-display font-extrabold text-3xl">Market research</h2>
-          <p className="text-white/60 text-sm mt-1">Gemini scans public forums for topics with rising velocity in your niche.</p>
+          <p className="text-white/60 text-sm mt-1">Auto-refreshed every 3 hours. New topics appear here without you clicking anything.</p>
         </div>
       </div>
 
       <Card className="tech-card rounded-none p-5" data-testid="research-runner">
-        <div className="text-[10px] font-mono text-white/40 tracking-widest">CONFIGURE</div>
+        <div className="text-[10px] font-mono text-white/40 tracking-widest">MANUAL BOOST (OPTIONAL)</div>
         <div className="flex flex-col md:flex-row gap-3 mt-3">
-          <Input value={focus} onChange={(e) => setFocus(e.target.value)} placeholder="Optional focus: e.g. 'retention hacks for D2C in India'" className="rounded-none bg-transparent" data-testid="input-focus" />
-          <Button onClick={runResearch} disabled={running} className="bg-cyber text-black hover:bg-yellow-400 rounded-none font-semibold" data-testid="btn-run-research">
-            {running ? <><Loader2 size={14} className="mr-2 animate-spin" /> Scanning…</> : <><Sparkles size={14} className="mr-2" /> Pull fresh signals</>}
+          <Input value={focus} onChange={(e) => setFocus(e.target.value)} placeholder="Optional focus for the next auto-cycle: e.g. 'retention hacks for D2C in India'" className="rounded-none bg-transparent" data-testid="input-focus" />
+          <Button onClick={runResearch} disabled={running} variant="outline" className="rounded-none border-white/15 hover:border-cyber hover:text-cyber" data-testid="btn-run-research">
+            {running ? <><Loader2 size={14} className="mr-2 animate-spin" /> Running…</> : <><Sparkles size={14} className="mr-2" /> Force run now</>}
           </Button>
         </div>
       </Card>

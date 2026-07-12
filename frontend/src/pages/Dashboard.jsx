@@ -4,8 +4,9 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { dashboardSummary, getProfile } from "@/lib/api";
-import { Users, PenSquare, Mail, TrendingUp, ArrowRight } from "lucide-react";
+import { dashboardSummary, getProfile, automationStatus, automationTick } from "@/lib/api";
+import { toast } from "sonner";
+import { Users, PenSquare, Mail, TrendingUp, ArrowRight, Zap, RefreshCcw, Loader2 } from "lucide-react";
 
 const Stat = ({ label, value, sub, testId }) => (
   <Card className="tech-card p-5 rounded-none" data-testid={testId}>
@@ -19,16 +20,38 @@ export default function Dashboard() {
   const [data, setData] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [autoStatus, setAutoStatus] = useState(null);
+  const [ticking, setTicking] = useState(false);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    Promise.all([dashboardSummary(), getProfile()])
-      .then(([s, p]) => {
+  const loadAll = () => {
+    Promise.all([dashboardSummary(), getProfile(), automationStatus().catch(() => null)])
+      .then(([s, p, a]) => {
         setData(s);
         setProfile(p);
+        setAutoStatus(a);
       })
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadAll();
+    const id = setInterval(loadAll, 30000);
+    return () => clearInterval(id);
   }, []);
+
+  const forceTick = async () => {
+    setTicking(true);
+    try {
+      await automationTick();
+      toast.success("Autonomous cycle queued — new topics, drafts and visuals coming.");
+      setTimeout(loadAll, 4000);
+    } catch (e) {
+      toast.error("Tick failed.");
+    } finally {
+      setTicking(false);
+    }
+  };
 
   const c = data?.counters || {};
   const positioning = profile?.positioning || "Consumer behavior based brand strategy and marketing executive";
@@ -67,6 +90,35 @@ export default function Dashboard() {
           <span className="text-white/50 text-sm">The engine scrapes public web signals every cycle and writes in your voice.</span>
         </p>
       </div>
+
+      {/* Autonomous status */}
+      <Card className="tech-card rounded-none p-5 border-l-4 border-cyber" data-testid="autonomy-card">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <Zap size={14} className="text-cyber" />
+              <div className="text-[10px] font-mono text-cyber tracking-widest">AUTONOMOUS ENGINE · ACTIVE</div>
+            </div>
+            <div className="text-sm text-white/85 mt-2 font-mono">
+              Cycle: every 3h · Buffer sync: {autoStatus?.last_buffer_sync ? new Date(autoStatus.last_buffer_sync).toLocaleString() : "not yet"}
+            </div>
+            {autoStatus?.upcoming?.length > 0 && (
+              <div className="text-xs text-white/60 mt-2">
+                Next scheduled: <span className="text-cyber font-mono">{new Date(autoStatus.upcoming[0].scheduled_for).toLocaleString()}</span>
+                {autoStatus.upcoming[0].buffer_post_id && <span className="text-emerald-400 ml-2">✓ on Buffer</span>}
+              </div>
+            )}
+            {autoStatus?.voice_fingerprint && (
+              <div className="text-[11px] text-white/50 mt-2 italic max-w-2xl truncate">
+                🖋 Voice fingerprint decoded from your Buffer past posts.
+              </div>
+            )}
+          </div>
+          <Button variant="outline" onClick={forceTick} disabled={ticking} className="rounded-none border-white/15 hover:border-cyber hover:text-cyber" data-testid="btn-force-tick">
+            {ticking ? <Loader2 size={14} className="mr-2 animate-spin" /> : <RefreshCcw size={14} className="mr-2" />} Run cycle now
+          </Button>
+        </div>
+      </Card>
 
       {/* Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

@@ -289,7 +289,32 @@ def profile_context(profile: Dict[str, Any]) -> str:
         f"- Signature hooks: {profile.get('signature_hooks') or 'N/A'}",
         f"- Tone samples: {profile.get('tone_samples') or 'N/A'}",
     ]
+    if profile.get("voice_fingerprint"):
+        lines.append(f"- VOICE FINGERPRINT (mimic this): {profile['voice_fingerprint']}")
+    if profile.get("past_posts"):
+        lines.append(f"- Real past posts (verbatim samples):\n{profile['past_posts'][:2500]}")
     return "\n".join(lines)
+
+
+async def ensure_voice_fingerprint(profile: Dict[str, Any]) -> Optional[str]:
+    """Build a compact voice-tone description from past posts if we don't have one yet."""
+    if profile.get("voice_fingerprint"):
+        return profile["voice_fingerprint"]
+    past = profile.get("past_posts") or ""
+    if len(past.strip()) < 80:
+        return None
+    system = (
+        "You are a linguistic profiler. Read the past posts and produce a compact "
+        "'voice fingerprint' any writer could follow: sentence length, punctuation "
+        "habits, code-mixed languages (Hinglish etc), signature words, humor style, "
+        "opinions, and 3-5 hook patterns quoted verbatim. Return plain text under 500 words."
+    )
+    user = f"Analyze this author's LinkedIn posts and write the voice fingerprint:\n\n{past[:4000]}"
+    fp = await gemini_chat(system, user, session_id=f"fingerprint-{uuid.uuid4()}")
+    fp = (fp or "").strip()
+    if fp:
+        await db.profile.update_one({"_id": "singleton"}, {"$set": {"voice_fingerprint": fp}}, upsert=True)
+    return fp or None
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +524,9 @@ async def list_posts(status: Optional[str] = None, limit: int = 100):
 @api_router.post("/posts/generate")
 async def generate_post(payload: GeneratePostIn):
     profile = await get_profile_doc()
+    # Ensure voice fingerprint is built from past posts before writing anything
+    await ensure_voice_fingerprint(profile)
+    profile = await get_profile_doc()
     prof_ctx = profile_context(profile)
 
     topic_title = payload.topic_title
@@ -512,21 +540,21 @@ async def generate_post(payload: GeneratePostIn):
     if not topic_title:
         raise HTTPException(400, "topic_title or topic_id required")
 
-    # Include any answered voice-Q&A for tone anchoring
     voice_docs = await db.voice_qa.find({"answered": True}, {"_id": 0}).sort("created_at", -1).to_list(10)
     voice_ctx = "\n".join(f"Q: {v['question']}\nA: {v.get('answer')}" for v in voice_docs) or "None yet."
 
     system = (
-        "You write LinkedIn posts as the user, in the user's voice. Rules: "
-        "punchy first line hook (max 12 words), short lines, one idea per line, "
-        "no corporate cliches, no emojis unless already used in the user's tone samples. "
+        "You write LinkedIn posts AS THE USER, mimicking their exact voice fingerprint "
+        "(sentence rhythm, code-mixed language if present, humor, signature words). "
+        "Rules: punchy first line hook (max 12 words), short lines, one idea per line, "
+        "no corporate cliches, no emojis unless the user already uses them. "
         "Return STRICT JSON with keys: hook, body, hashtags (array of 3-6 without #), call_to_action."
     )
     user = f"""
 User profile & voice:
 {prof_ctx}
 
-The user has answered these voice-anchor questions (use them to mimic tone/opinions):
+Voice-anchor Q&A (mimic tone/opinions):
 {voice_ctx}
 
 Write a LinkedIn post about:
@@ -560,8 +588,21 @@ async def update_post(post_id: str, payload: UpdatePostIn):
     update = {k: v for k, v in payload.model_dump().items() if v is not None}
     if not update:
         raise HTTPException(400, "no fields to update")
+    prev = await db.posts.find_one({"_id": post_id}, {"_id": 0})
     await db.posts.update_one({"_id": post_id}, {"$set": update})
     doc = await db.posts.find_one({"_id": post_id}, {"_id": 0})
+
+    # Auto-schedule the moment status transitions to "approved"
+    if (prev and prev.get("status") != "approved" and update.get("status") == "approved"):
+        try:
+            slot = await pick_optimal_slot()
+            await schedule_post(post_id, {"scheduled_for": slot})
+            doc = await db.posts.find_one({"_id": post_id}, {"_id": 0})
+        except Exception as exc:
+            logger.warning("auto-schedule after approve failed: %s", exc)
+
+    if doc:
+        _clean_post_shape(doc)
     return doc or {}
 
 
@@ -572,6 +613,44 @@ async def delete_post(post_id: str):
 
 
 BUFFER_GQL_URL = "https://api.buffer.com/graphql"
+
+
+async def pick_optimal_slot() -> str:
+    """Return an ISO datetime for the next post: honors best-time-of-day,
+    LinkedIn-friendly hours, and spreads a queue of approved posts across days."""
+    profile = await get_profile_doc()
+
+    # Gather what's already scheduled locally
+    scheduled = await db.posts.find(
+        {"status": "scheduled", "scheduled_for": {"$ne": None}},
+        {"scheduled_for": 1, "_id": 0},
+    ).to_list(200)
+    booked = set()
+    for s in scheduled:
+        try:
+            dt = datetime.fromisoformat(s["scheduled_for"].replace("Z", "+00:00"))
+            booked.add(dt.strftime("%Y-%m-%d"))
+        except Exception:
+            continue
+
+    # Best hours to try (local IST-ish then afternoon UTC — LinkedIn peak windows).
+    best_hours_utc = [3, 8, 12, 15]  # ~08:30 IST, 13:30 IST, 17:30 IST, 20:30 IST
+
+    now = datetime.now(timezone.utc)
+    # First day starts today if it's still early enough, else tomorrow
+    day = now.date()
+    for _ in range(30):  # look up to 30 days ahead
+        if day.strftime("%Y-%m-%d") in booked:
+            day = day + timedelta(days=1)
+            continue
+        for h in best_hours_utc:
+            candidate = datetime(day.year, day.month, day.day, h, 0, tzinfo=timezone.utc)
+            if candidate > now + timedelta(minutes=15):
+                return candidate.isoformat()
+        # exhausted best hours for this day; move on
+        day = day + timedelta(days=1)
+    # Fallback
+    return (now + timedelta(hours=2)).isoformat()
 
 
 async def buffer_gql(api_key: str, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -641,28 +720,38 @@ async def schedule_post(post_id: str, payload: Dict[str, Any]):
             raise HTTPException(400, "No Buffer channel found. Connect a channel inside Buffer first.")
 
         mutation = """
-        mutation Create($orgId: OrganizationId!, $channels: [ChannelInput!]!, $content: PostContentInput!, $schedulingType: SchedulingType!, $dueAt: DateTime) {
-          createPost(input: { organizationId: $orgId, channels: $channels, content: $content, schedulingType: $schedulingType, dueAt: $dueAt }) {
+        mutation Create($input: CreatePostInput!) {
+          createPost(input: $input) {
+            __typename
             ... on PostActionSuccess { post { id status dueAt } }
-            ... on PostActionError   { code message }
+            ... on NotFoundError     { message }
+            ... on UnauthorizedError { message }
+            ... on LimitReachedError { message }
+            ... on InvalidInputError { message }
+            ... on UnexpectedError   { message }
+            ... on RestProxyError    { message code }
           }
         }
         """
         variables = {
-            "orgId": org_id,
-            "channels": [{"id": channel_id}],
-            "content": {"text": full_text[:2900]},
-            "schedulingType": "CUSTOM",
-            "dueAt": scheduled_for,
+            "input": {
+                "channelId": channel_id,
+                "text": full_text[:2900],
+                "assets": [],
+                "mode": "customScheduled",
+                "schedulingType": "automatic",
+                "dueAt": scheduled_for,
+            }
         }
         try:
             data = await buffer_gql(profile["buffer_api_key"], mutation, variables)
             result = data.get("createPost") or {}
-            if result.get("post"):
+            typename = result.get("__typename")
+            if typename == "PostActionSuccess" and result.get("post"):
                 external_id = result["post"].get("id")
-                detail = f"Scheduled on Buffer. Post id {external_id}."
-            elif result.get("message"):
-                detail = f"Buffer refused: {result.get('message')}"
+                detail = f"Scheduled on Buffer for {scheduled_for}."
+            else:
+                detail = f"Buffer refused ({typename}): {result.get('message') or 'unknown'}"
         except HTTPException as exc:
             detail = f"Buffer failed: {exc.detail}"
 
@@ -805,16 +894,44 @@ async def generate_post_image(post_id: str, payload: GenerateImageIn):
     if not post:
         raise HTTPException(404, "post not found")
 
-    import base64
-    prompt = (payload.prompt or f"LinkedIn post visual for the concept: '{post.get('hook') or post.get('topic_title')}'. "
-              f"Post body context: {(post.get('body') or '')[:300]}. "
-              f"Style: {payload.style}. Square 1:1. No text, no lettering. Editorial, magazine-cover level.")
+    # Step 1 — Ask Gemini text to design a concrete visual concept from the post
+    hook = post.get("hook") or post.get("topic_title") or ""
+    body = post.get("body") or ""
+    concept_system = (
+        "You are an art director for LinkedIn thought-leader visuals. Given a post, "
+        "you invent ONE strong image concept that visually represents the post's core "
+        "idea — not a generic 'business abstract'. It must be specific, metaphorical, "
+        "and memorable (like a New Yorker cover). Output STRICT JSON with keys: "
+        "subject (what is in the image), composition (framing/angles), palette, mood, "
+        "lighting, forbidden (things to avoid)."
+    )
+    concept_user = f"Post hook: {hook}\n\nPost body: {body[:900]}\n\nReturn JSON only."
+    try:
+        concept_raw = await gemini_chat(concept_system, concept_user, session_id=f"art-{post_id}")
+        concept = _extract_json(concept_raw) or {}
+    except Exception:
+        concept = {}
+
+    subject = concept.get("subject") or f"visual metaphor of: {hook}"
+    composition = concept.get("composition") or "off-center subject, negative space, rule of thirds"
+    palette = concept.get("palette") or "deep black background with a single cyber-yellow (#FFD700) accent, muted greys"
+    mood = concept.get("mood") or "editorial, confident, slightly unsettling"
+    lighting = concept.get("lighting") or "cinematic rim light, high contrast"
+    forbidden = concept.get("forbidden") or "no text, no lettering, no logos, no watermarks, no busy backgrounds, no cliche stock imagery"
+
+    prompt = payload.prompt or (
+        f"Editorial LinkedIn post cover, square 1:1. SUBJECT: {subject}. "
+        f"COMPOSITION: {composition}. PALETTE: {palette}. MOOD: {mood}. "
+        f"LIGHTING: {lighting}. STYLE: high-end magazine cover, painterly-photographic hybrid, "
+        f"crisp focal point, rich texture. Absolutely NO text, no letters, no numbers on the image. "
+        f"AVOID: {forbidden}."
+    )
 
     from emergentintegrations.llm.chat import LlmChat as _LlmChat, UserMessage as _UM
     chat = _LlmChat(
         api_key=EMERGENT_LLM_KEY,
         session_id=f"img-{post_id}-{uuid.uuid4()}",
-        system_message="You generate clean minimal editorial poster visuals for LinkedIn posts.",
+        system_message="You generate editorial, concept-driven cover images for LinkedIn posts. No text on canvas.",
     ).with_model("gemini", "gemini-3.1-flash-image-preview").with_params(modalities=["image", "text"])
 
     try:
@@ -1103,6 +1220,103 @@ async def root():
 
 
 # ---------------------------------------------------------------------------
+# Autonomous cycle (research → draft → visual). Buffer sync + fingerprint.
+# ---------------------------------------------------------------------------
+async def autonomous_tick(force: bool = False) -> Dict[str, Any]:
+    """One heartbeat of autonomy:
+       - if past posts stale, resync Buffer + refresh voice fingerprint
+       - if no unused viral topics, pull fresh research
+       - draft a post from the top viral topic that has no draft yet
+       - generate a visual for that draft
+    """
+    profile = await get_profile_doc()
+    if not profile:
+        return {"ok": False, "note": "profile not set"}
+
+    # 1. Refresh Buffer past posts every 6h if key present
+    if profile.get("buffer_api_key"):
+        last = profile.get("buffer_last_sync")
+        needs = force or not last
+        if not needs and last:
+            try:
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                needs = (datetime.now(timezone.utc) - last_dt) > timedelta(hours=6)
+            except Exception:
+                needs = True
+        if needs:
+            try:
+                await buffer_sync_past_posts()
+                # Rebuild fingerprint on new past-post data
+                await db.profile.update_one({"_id": "singleton"},
+                                            {"$unset": {"voice_fingerprint": ""}})
+                await ensure_voice_fingerprint(await get_profile_doc())
+            except Exception as exc:
+                logger.warning("buffer sync in tick failed: %s", exc)
+
+    # 2. Ensure research bench isn't empty
+    fresh_topics = await db.research.find({}, {"_id": 0}).sort("created_at", -1).to_list(20)
+    used_topic_ids = set(p.get("topic_id") for p in await db.posts.find({"topic_id": {"$ne": None}}, {"topic_id": 1}).to_list(500))
+    unused_topics = [t for t in fresh_topics if t["id"] not in used_topic_ids]
+    if len(unused_topics) < 3:
+        try:
+            await generate_research(GenerateResearchIn(n=6))
+            fresh_topics = await db.research.find({}, {"_id": 0}).sort("created_at", -1).to_list(20)
+            unused_topics = [t for t in fresh_topics if t["id"] not in used_topic_ids]
+        except Exception as exc:
+            logger.warning("autonomous research failed: %s", exc)
+
+    # 3. Draft a post from the highest-virality unused topic
+    drafted = None
+    if unused_topics:
+        topic = sorted(unused_topics, key=lambda x: x.get("virality_score", 0), reverse=True)[0]
+        try:
+            drafted = await generate_post(GeneratePostIn(topic_id=topic["id"]))
+        except Exception as exc:
+            logger.warning("autonomous draft failed: %s", exc)
+
+    # 4. Generate visual for the freshly-drafted post
+    if drafted and drafted.get("id"):
+        try:
+            await generate_post_image(drafted["id"], GenerateImageIn())
+        except Exception as exc:
+            logger.warning("autonomous image failed: %s", exc)
+
+    await db.jobs.insert_one({
+        "_id": str(uuid.uuid4()),
+        "kind": "autonomous_tick",
+        "created_at": now_iso(),
+        "drafted_post": (drafted or {}).get("id"),
+    })
+    return {"ok": True, "drafted_post_id": (drafted or {}).get("id")}
+
+
+@api_router.post("/automation/tick")
+async def automation_tick_endpoint(background: BackgroundTasks):
+    """Fire the autonomous cycle out-of-band."""
+    background.add_task(autonomous_tick, True)
+    return {"ok": True, "queued": True}
+
+
+@api_router.get("/automation/status")
+async def automation_status():
+    profile = await get_profile_doc()
+    last_job = await db.jobs.find_one(
+        {"kind": "autonomous_tick"}, {"_id": 0}, sort=[("created_at", -1)]
+    )
+    upcoming = await db.posts.find(
+        {"status": "scheduled", "scheduled_for": {"$ne": None}},
+        {"_id": 0, "hook": 1, "scheduled_for": 1, "buffer_post_id": 1, "id": 1},
+    ).sort("scheduled_for", 1).to_list(20)
+    return {
+        "cycle_hours": profile.get("cycle_hours") or 6,
+        "last_tick": last_job,
+        "last_buffer_sync": profile.get("buffer_last_sync"),
+        "voice_fingerprint": profile.get("voice_fingerprint"),
+        "upcoming": upcoming,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Wiring
 # ---------------------------------------------------------------------------
 app.include_router(api_router)
@@ -1115,6 +1329,29 @@ app.add_middleware(
 )
 
 
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    _scheduler = AsyncIOScheduler(timezone="UTC")
+except Exception:  # pragma: no cover
+    _scheduler = None
+
+
+@app.on_event("startup")
+async def _startup():
+    if _scheduler is None:
+        return
+    # Kick a tick every 3 hours (research + draft + visual).
+    _scheduler.add_job(autonomous_tick, "interval", hours=3,
+                       id="tick", replace_existing=True, next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1))
+    _scheduler.start()
+    logger.info("Autonomous scheduler started.")
+
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    if _scheduler is not None:
+        try:
+            _scheduler.shutdown(wait=False)
+        except Exception:
+            pass
     client.close()

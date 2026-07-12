@@ -38,6 +38,10 @@ export const bufferChannels = () => api.get("/buffer/channels").then((r) => r.da
 export const bufferSyncPast = () => api.post("/buffer/sync-past-posts", {}).then((r) => r.data);
 export const bufferAnalytics = (days = 30) => api.post("/buffer/analytics", { days }).then((r) => r.data);
 
+// Automation
+export const automationStatus = () => api.get("/automation/status").then((r) => r.data);
+export const automationTick = () => api.post("/automation/tick").then((r) => r.data);
+
 // Voice Q&A
 export const listVoice = () => api.get("/voice-questions").then((r) => r.data);
 export const generateVoice = (n = 4) => api.post("/voice-questions/generate", { n }).then((r) => r.data);
