@@ -5,9 +5,9 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { listPosts, updatePost, deletePost, schedulePost, generatePost } from "@/lib/api";
+import { listPosts, updatePost, deletePost, schedulePost, generatePost, generatePostImage } from "@/lib/api";
 import { toast } from "sonner";
-import { CheckCircle2, XCircle, Trash2, CalendarClock, PenSquare, Copy, Loader2, Sparkles } from "lucide-react";
+import { CheckCircle2, XCircle, Trash2, CalendarClock, PenSquare, Copy, Loader2, Sparkles, ImageIcon, Download } from "lucide-react";
 
 const StatusPill = ({ status }) => {
   const map = {
@@ -28,6 +28,7 @@ export default function Posts() {
   const [genOpen, setGenOpen] = useState(false);
   const [genForm, setGenForm] = useState({ topic_title: "", angle: "", extra_notes: "" });
   const [generating, setGenerating] = useState(false);
+  const [imaging, setImaging] = useState({});
 
   const load = () => {
     setLoading(true);
@@ -82,6 +83,27 @@ export default function Posts() {
     } finally {
       setGenerating(false);
     }
+  };
+
+  const makeImage = async (id) => {
+    setImaging((m) => ({ ...m, [id]: true }));
+    try {
+      const res = await generatePostImage(id);
+      setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, image_data: res.image_data } : p)));
+      toast.success("Visual generated.");
+    } catch (e) {
+      toast.error("Image failed: " + (e?.response?.data?.detail || e.message));
+    } finally {
+      setImaging((m) => ({ ...m, [id]: false }));
+    }
+  };
+
+  const downloadImage = (p) => {
+    if (!p.image_data) return;
+    const a = document.createElement("a");
+    a.href = p.image_data;
+    a.download = `post-${p.id.slice(0, 8)}.png`;
+    a.click();
   };
 
   return (
@@ -149,16 +171,52 @@ export default function Posts() {
                   <Button variant="outline" onClick={() => setEditing(null)} className="rounded-none border-white/15" data-testid={`done-edit-${p.id}`}>Done editing</Button>
                 </div>
               ) : (
-                <>
-                  <div className="font-display font-bold text-xl leading-snug mb-2">{p.hook}</div>
-                  <div className="text-sm text-white/80 whitespace-pre-wrap leading-relaxed">{p.body}</div>
-                  {p.hashtags?.length > 0 && (
-                    <div className="mt-3 flex flex-wrap gap-1.5">
-                      {p.hashtags.map((h, idx) => <span key={idx} className="text-xs font-mono text-cyber">#{h}</span>)}
-                    </div>
-                  )}
-                  {p.call_to_action && <div className="mt-3 text-sm text-white/70 italic">→ {p.call_to_action}</div>}
-                </>
+                <div className="grid grid-cols-1 lg:grid-cols-[1fr,240px] gap-4">
+                  <div>
+                    <div className="font-display font-bold text-xl leading-snug mb-2">{p.hook}</div>
+                    <div className="text-sm text-white/80 whitespace-pre-wrap leading-relaxed">{p.body}</div>
+                    {p.hashtags?.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {p.hashtags.map((h, idx) => <span key={idx} className="text-xs font-mono text-cyber">#{h.replace(/^#/, "")}</span>)}
+                      </div>
+                    )}
+                    {p.call_to_action && <div className="mt-3 text-sm text-white/70 italic">→ {p.call_to_action}</div>}
+                  </div>
+                  <div className="min-w-0">
+                    {p.image_data ? (
+                      <div className="relative group">
+                        <img src={p.image_data} alt="post visual" className="w-full aspect-square object-cover border border-white/10" data-testid={`img-${p.id}`} />
+                        <div className="absolute inset-0 opacity-0 group-hover:opacity-100 bg-black/60 flex items-center justify-center gap-2 transition-opacity duration-200">
+                          <Button size="sm" onClick={() => downloadImage(p)} className="rounded-none bg-cyber text-black hover:bg-yellow-400 font-semibold" data-testid={`download-img-${p.id}`}>
+                            <Download size={12} className="mr-1" /> PNG
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => makeImage(p.id)} disabled={imaging[p.id]} className="rounded-none border-white/40 bg-transparent" data-testid={`regen-img-${p.id}`}>
+                            {imaging[p.id] ? <Loader2 size={12} className="animate-spin" /> : <ImageIcon size={12} />}
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => makeImage(p.id)}
+                        disabled={imaging[p.id]}
+                        className="w-full aspect-square border border-dashed border-white/15 hover:border-cyber flex flex-col items-center justify-center gap-2 text-white/40 hover:text-cyber transition-colors duration-200"
+                        data-testid={`make-img-${p.id}`}
+                      >
+                        {imaging[p.id] ? (
+                          <>
+                            <Loader2 size={20} className="animate-spin" />
+                            <span className="text-[10px] font-mono tracking-widest">GENERATING…</span>
+                          </>
+                        ) : (
+                          <>
+                            <ImageIcon size={20} />
+                            <span className="text-[10px] font-mono tracking-widest">GENERATE VISUAL</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                </div>
               )}
 
               {p.metrics && (

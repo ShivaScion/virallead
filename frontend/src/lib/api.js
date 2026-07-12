@@ -30,6 +30,13 @@ export const schedulePost = (id, payload) => api.post(`/posts/${id}/schedule`, p
 export const refreshMetrics = (id, post_url) =>
   api.post(`/posts/${id}/metrics/refresh`, { post_id: id, post_url }).then((r) => r.data);
 export const strategyNext = () => api.post("/posts/strategy").then((r) => r.data);
+export const generatePostImage = (id, prompt) =>
+  api.post(`/posts/${id}/generate-image`, { prompt }).then((r) => r.data);
+
+// Buffer
+export const bufferChannels = () => api.get("/buffer/channels").then((r) => r.data);
+export const bufferSyncPast = () => api.post("/buffer/sync-past-posts", {}).then((r) => r.data);
+export const bufferAnalytics = (days = 30) => api.post("/buffer/analytics", { days }).then((r) => r.data);
 
 // Voice Q&A
 export const listVoice = () => api.get("/voice-questions").then((r) => r.data);

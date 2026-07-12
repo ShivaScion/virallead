@@ -132,6 +132,10 @@ class Post(BaseModel):
     scheduled_for: Optional[str] = None
     metrics: Optional[Dict[str, Any]] = None  # {likes, comments, shares, impressions, updated_at, source}
     learnings: Optional[str] = None
+    image_data: Optional[str] = None  # data URL: data:image/png;base64,...
+    image_prompt: Optional[str] = None
+    buffer_post_id: Optional[str] = None
+    buffer_channel_id: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -208,30 +212,64 @@ async def gemini_chat(system_message: str, user_text: str, session_id: Optional[
 
 
 def _extract_json(text: str) -> Any:
-    """Pull the first JSON array/object out of an LLM response."""
+    """Pull the first balanced JSON array/object out of an LLM response."""
     if not text:
         return None
-    # fenced ```json ... ```
-    m = re.search(r"```(?:json)?\s*(\[.*?\]|\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            pass
-    # first [...] or {...}
-    for opener, closer in (("[", "]"), ("{", "}")):
-        i = text.find(opener)
-        if i != -1:
-            j = text.rfind(closer)
-            if j > i:
-                try:
-                    return json.loads(text[i:j + 1])
-                except Exception:
-                    continue
+    text = text.strip()
+    # Strip markdown fences if the entire message is a fenced block.
+    fence = re.match(r"^```(?:json|JSON)?\s*(.*?)\s*```\s*$", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
     try:
         return json.loads(text)
     except Exception:
-        return None
+        pass
+    # Bracket-balanced scan for the first complete JSON object/array.
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = text.find(opener)
+        while start != -1:
+            depth = 0
+            in_str = False
+            esc = False
+            for i in range(start, len(text)):
+                ch = text[i]
+                if esc:
+                    esc = False
+                    continue
+                if ch == "\\":
+                    esc = True
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if ch == opener:
+                    depth += 1
+                elif ch == closer:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start:i + 1])
+                        except Exception:
+                            break
+            start = text.find(opener, start + 1)
+    return None
+
+
+def _clean_post_shape(post: Dict[str, Any]) -> Dict[str, Any]:
+    """If body accidentally holds a JSON string, unpack it into hook/body/hashtags."""
+    body = post.get("body") or ""
+    if isinstance(body, str) and body.lstrip().startswith(("{", "```")):
+        parsed = _extract_json(body)
+        if isinstance(parsed, dict) and ("hook" in parsed or "body" in parsed):
+            post["hook"] = post.get("hook") or parsed.get("hook") or ""
+            post["body"] = parsed.get("body") or ""
+            if not post.get("hashtags") and parsed.get("hashtags"):
+                post["hashtags"] = parsed.get("hashtags") or []
+            if not post.get("call_to_action") and parsed.get("call_to_action"):
+                post["call_to_action"] = parsed.get("call_to_action")
+    return post
 
 
 async def get_profile_doc() -> Dict[str, Any]:
@@ -452,6 +490,9 @@ async def list_posts(status: Optional[str] = None, limit: int = 100):
     if status:
         q["status"] = status
     docs = await db.posts.find(q, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    # Repair any legacy docs where Gemini's JSON leaked into body
+    for d in docs:
+        _clean_post_shape(d)
     return docs
 
 
@@ -530,36 +571,115 @@ async def delete_post(post_id: str):
     return {"ok": True}
 
 
+BUFFER_GQL_URL = "https://api.buffer.com/graphql"
+
+
+async def buffer_gql(api_key: str, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not api_key:
+        raise HTTPException(400, "Buffer API key not set. Add it in Settings first.")
+    async with httpx.AsyncClient(timeout=30) as ac:
+        r = await ac.post(
+            BUFFER_GQL_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"query": query, "variables": variables or {}},
+        )
+        try:
+            data = r.json()
+        except Exception:
+            raise HTTPException(502, f"Buffer non-JSON response: {r.text[:200]}")
+    if r.status_code >= 400 or data.get("errors"):
+        errs = data.get("errors") or [{"message": r.text[:300]}]
+        raise HTTPException(502, "Buffer error: " + "; ".join(e.get("message", "?") for e in errs))
+    return data.get("data") or {}
+
+
+async def buffer_org_id(profile: Dict[str, Any]) -> str:
+    """Resolve and cache the Buffer organization id."""
+    api_key = profile.get("buffer_api_key") or ""
+    if profile.get("buffer_org_id"):
+        return profile["buffer_org_id"]
+    data = await buffer_gql(api_key, "{ account { id organizations { id name } } }")
+    orgs = ((data.get("account") or {}).get("organizations")) or []
+    if not orgs:
+        raise HTTPException(400, "No Buffer organizations visible on this token.")
+    org_id = orgs[0]["id"]
+    await db.profile.update_one({"_id": "singleton"}, {"$set": {"buffer_org_id": org_id}}, upsert=True)
+    return org_id
+
+
 @api_router.post("/posts/{post_id}/schedule")
 async def schedule_post(post_id: str, payload: Dict[str, Any]):
     profile = await get_profile_doc()
+    post = await db.posts.find_one({"_id": post_id}, {"_id": 0})
+    if not post:
+        raise HTTPException(404, "post not found")
+
     scheduled_for = payload.get("scheduled_for") or (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     provider = profile.get("scheduler_provider") or "manual"
+    channel_id = payload.get("channel_id") or post.get("buffer_channel_id")
+
+    hashtags = " ".join(f"#{h.lstrip('#')}" for h in (post.get("hashtags") or []))
+    full_text = payload.get("full_text") or "\n\n".join(
+        x for x in [post.get("hook"), post.get("body"), hashtags,
+                    (f"→ {post['call_to_action']}" if post.get("call_to_action") else None)] if x
+    )
 
     external_id: Optional[str] = None
-    detail = "Stored locally. No scheduler API key configured — post visible in your queue."
+    detail = "Stored locally. No scheduler configured — copy from your queue."
 
     if provider == "buffer" and profile.get("buffer_api_key"):
-        # Buffer's public API is limited; we record intent + surface the key was accepted.
-        # Real Buffer integration requires per-profile IDs the user pastes in later.
-        detail = "Scheduled with Buffer intent. Confirm the queue entry inside Buffer."
-    elif provider == "publer" and profile.get("publer_api_key"):
-        # Publer accepts drafts via API; attempt a simple POST if their base URL is known.
+        org_id = await buffer_org_id(profile)
+        if not channel_id:
+            data = await buffer_gql(profile["buffer_api_key"],
+                                    "query C($id: OrganizationId!) { channels(input: {organizationId: $id}) { id name service } }",
+                                    {"id": org_id})
+            channels = data.get("channels") or []
+            li = next((c for c in channels if c.get("service") == "linkedin"), None) or (channels[0] if channels else None)
+            if li:
+                channel_id = li["id"]
+        if not channel_id:
+            raise HTTPException(400, "No Buffer channel found. Connect a channel inside Buffer first.")
+
+        mutation = """
+        mutation Create($orgId: OrganizationId!, $channels: [ChannelInput!]!, $content: PostContentInput!, $schedulingType: SchedulingType!, $dueAt: DateTime) {
+          createPost(input: { organizationId: $orgId, channels: $channels, content: $content, schedulingType: $schedulingType, dueAt: $dueAt }) {
+            ... on PostActionSuccess { post { id status dueAt } }
+            ... on PostActionError   { code message }
+          }
+        }
+        """
+        variables = {
+            "orgId": org_id,
+            "channels": [{"id": channel_id}],
+            "content": {"text": full_text[:2900]},
+            "schedulingType": "CUSTOM",
+            "dueAt": scheduled_for,
+        }
         try:
-            async with httpx.AsyncClient(timeout=10) as ac:
+            data = await buffer_gql(profile["buffer_api_key"], mutation, variables)
+            result = data.get("createPost") or {}
+            if result.get("post"):
+                external_id = result["post"].get("id")
+                detail = f"Scheduled on Buffer. Post id {external_id}."
+            elif result.get("message"):
+                detail = f"Buffer refused: {result.get('message')}"
+        except HTTPException as exc:
+            detail = f"Buffer failed: {exc.detail}"
+
+    elif provider == "publer" and profile.get("publer_api_key"):
+        try:
+            async with httpx.AsyncClient(timeout=15) as ac:
                 r = await ac.post(
                     "https://app.publer.io/api/v1/posts/schedule/create",
                     headers={
                         "Authorization": f"Bearer-API {profile['publer_api_key']}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "posts": [{
-                            "networks": ["linkedin"],
-                            "details": {"text": (payload.get('full_text') or '')[:2900]},
-                            "scheduled_at": scheduled_for,
-                        }]
-                    },
+                    json={"posts": [{
+                        "networks": ["linkedin"],
+                        "details": {"text": full_text[:2900]},
+                        "scheduled_at": scheduled_for,
+                    }]},
                 )
                 if r.status_code < 400:
                     external_id = str(r.json().get("job_id") or r.json().get("id") or "")
@@ -571,11 +691,146 @@ async def schedule_post(post_id: str, payload: Dict[str, Any]):
 
     await db.posts.update_one(
         {"_id": post_id},
-        {"$set": {"status": "scheduled", "scheduled_for": scheduled_for,
-                  "external_scheduler_id": external_id}},
+        {"$set": {
+            "status": "scheduled",
+            "scheduled_for": scheduled_for,
+            "buffer_post_id": external_id if provider == "buffer" else post.get("buffer_post_id"),
+            "buffer_channel_id": channel_id if provider == "buffer" else post.get("buffer_channel_id"),
+        }},
     )
     doc = await db.posts.find_one({"_id": post_id}, {"_id": 0})
-    return {"post": doc, "detail": detail, "provider": provider}
+    _clean_post_shape(doc)
+    return {"post": doc, "detail": detail, "provider": provider, "channel_id": channel_id}
+
+
+# ---------------------------------------------------------------------------
+# Buffer sync (past posts + analytics)
+# ---------------------------------------------------------------------------
+@api_router.get("/buffer/channels")
+async def buffer_channels():
+    profile = await get_profile_doc()
+    org_id = await buffer_org_id(profile)
+    data = await buffer_gql(
+        profile.get("buffer_api_key", ""),
+        "query C($id: OrganizationId!) { channels(input: {organizationId: $id}) { id name service avatar } }",
+        {"id": org_id},
+    )
+    return data.get("channels") or []
+
+
+@api_router.post("/buffer/sync-past-posts")
+async def buffer_sync_past_posts(payload: Optional[Dict[str, Any]] = None):
+    profile = await get_profile_doc()
+    org_id = await buffer_org_id(profile)
+    query = """
+    query PastPosts($orgId: OrganizationId!) {
+      posts(input: { organizationId: $orgId, filter: { status: sent } }) {
+        edges {
+          node {
+            id text createdAt
+            channel { service name }
+            metrics { name value unit }
+          }
+        }
+      }
+    }
+    """
+    data = await buffer_gql(profile.get("buffer_api_key", ""), query, {"orgId": org_id})
+    edges = ((data.get("posts") or {}).get("edges")) or []
+    items = []
+    tone_texts = []
+    for e in edges:
+        node = e.get("node") or {}
+        txt = (node.get("text") or "").strip()
+        if txt:
+            items.append({
+                "id": node.get("id"),
+                "text": txt,
+                "sent_at": node.get("createdAt"),
+                "channel": (node.get("channel") or {}).get("name"),
+                "service": (node.get("channel") or {}).get("service"),
+                "metrics": node.get("metrics") or [],
+            })
+            tone_texts.append(txt)
+
+    if tone_texts:
+        joined = "\n\n---\n\n".join(tone_texts[:8])
+        await db.profile.update_one(
+            {"_id": "singleton"},
+            {"$set": {"past_posts": joined, "buffer_last_sync": now_iso()}},
+            upsert=True,
+        )
+    await db.buffer_posts.delete_many({})
+    if items:
+        await db.buffer_posts.insert_many([{**it, "_id": it.get("id") or str(uuid.uuid4())} for it in items])
+    return {"count": len(items), "posts": items}
+
+
+@api_router.post("/buffer/analytics")
+async def buffer_analytics(payload: Optional[Dict[str, Any]] = None):
+    profile = await get_profile_doc()
+    org_id = await buffer_org_id(profile)
+    days = int((payload or {}).get("days", 30))
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=days)
+    query = """
+    query Agg($orgId: OrganizationId!, $start: DateTime!, $end: DateTime!) {
+      aggregatedPostMetrics(input: { organizationId: $orgId, startDateTime: $start, endDateTime: $end }) {
+        metrics { name value unit }
+      }
+    }
+    """
+    try:
+        data = await buffer_gql(profile.get("buffer_api_key", ""), query,
+                                {"orgId": org_id, "start": start_dt.isoformat(), "end": end_dt.isoformat()})
+        entries = ((data.get("aggregatedPostMetrics") or {}).get("metrics")) or []
+    except HTTPException as exc:
+        return {"entries": [], "note": str(exc.detail), "days": days}
+    return {"entries": entries, "days": days}
+
+
+# ---------------------------------------------------------------------------
+# Image generation (Gemini Nano Banana)
+# ---------------------------------------------------------------------------
+class GenerateImageIn(BaseModel):
+    prompt: Optional[str] = None
+    style: Optional[str] = "clean minimal editorial poster, high-contrast, dark background, cyber-yellow accents, no text"
+
+
+@api_router.post("/posts/{post_id}/generate-image")
+async def generate_post_image(post_id: str, payload: GenerateImageIn):
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(500, "EMERGENT_LLM_KEY not configured")
+    post = await db.posts.find_one({"_id": post_id}, {"_id": 0})
+    if not post:
+        raise HTTPException(404, "post not found")
+
+    import base64
+    prompt = (payload.prompt or f"LinkedIn post visual for the concept: '{post.get('hook') or post.get('topic_title')}'. "
+              f"Post body context: {(post.get('body') or '')[:300]}. "
+              f"Style: {payload.style}. Square 1:1. No text, no lettering. Editorial, magazine-cover level.")
+
+    from emergentintegrations.llm.chat import LlmChat as _LlmChat, UserMessage as _UM
+    chat = _LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"img-{post_id}-{uuid.uuid4()}",
+        system_message="You generate clean minimal editorial poster visuals for LinkedIn posts.",
+    ).with_model("gemini", "gemini-3.1-flash-image-preview").with_params(modalities=["image", "text"])
+
+    try:
+        _, images = await chat.send_message_multimodal_response(_UM(text=prompt))
+    except Exception as exc:
+        raise HTTPException(502, f"Image generation failed: {exc}")
+
+    if not images:
+        raise HTTPException(502, "Model returned no image.")
+
+    img = images[0]
+    mime = img.get("mime_type") or "image/png"
+    data_url = f"data:{mime};base64,{img.get('data')}"
+    await db.posts.update_one({"_id": post_id},
+                              {"$set": {"image_data": data_url, "image_prompt": prompt}})
+    return {"image_data": data_url, "prompt": prompt}
 
 
 @api_router.post("/posts/{post_id}/metrics/refresh")
@@ -639,17 +894,28 @@ async def strategy_next():
         "learnings": p.get("learnings"),
     } for p in posts]
 
+    # Include real Buffer analytics if synced
+    buffer_posts = await db.buffer_posts.find({}, {"_id": 0}).to_list(30)
+    buffer_summary = [{
+        "text": (bp.get("text") or "")[:220],
+        "sent_at": bp.get("sent_at"),
+        "metrics": bp.get("metrics") or [],
+    } for bp in buffer_posts]
+
     system = (
         "You are the user's content strategist. Based on their recent posts and "
-        "measured/estimated metrics, propose the next 3 post ideas and a specific "
-        "adjustment to their voice. Output STRICT JSON only."
+        "measured Buffer metrics + estimated metrics, propose the next 3 post ideas "
+        "and a specific adjustment to their voice. Output STRICT JSON only."
     )
     user = f"""
 User profile:
 {prof_ctx}
 
-Recent posts JSON:
-{json.dumps(summary)[:6000]}
+AI-generated posts (with estimated metrics):
+{json.dumps(summary)[:4000]}
+
+Real past posts pulled from Buffer (with actual network metrics):
+{json.dumps(buffer_summary)[:4000]}
 
 Return JSON with keys:
   patterns (array of 3 short strings of what's working),

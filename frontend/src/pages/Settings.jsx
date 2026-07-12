@@ -4,9 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { getProfile, saveProfile } from "@/lib/api";
+import { getProfile, saveProfile, bufferSyncPast, bufferChannels } from "@/lib/api";
 import { toast } from "sonner";
-import { Save, ExternalLink } from "lucide-react";
+import { Save, ExternalLink, RefreshCcw, Loader2, CheckCircle2 } from "lucide-react";
 
 export default function Settings() {
   const [form, setForm] = useState({
@@ -17,10 +17,16 @@ export default function Settings() {
   });
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [channels, setChannels] = useState([]);
+  const [lastSync, setLastSync] = useState(null);
 
   useEffect(() => {
     getProfile()
-      .then((p) => setForm((f) => ({ ...f, ...p })))
+      .then((p) => {
+        setForm((f) => ({ ...f, ...p }));
+        setLastSync(p?.buffer_last_sync);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -35,6 +41,21 @@ export default function Settings() {
       toast.error("Save failed");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const syncBuffer = async () => {
+    setSyncing(true);
+    try {
+      await saveProfile(form); // ensure key is saved first
+      const [chans, sync] = await Promise.all([bufferChannels(), bufferSyncPast()]);
+      setChannels(chans);
+      setLastSync(new Date().toISOString());
+      toast.success(`Synced ${sync.count} past posts. Voice fingerprint updated.`);
+    } catch (e) {
+      toast.error("Buffer sync failed: " + (e?.response?.data?.detail || e.message));
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -68,19 +89,43 @@ export default function Settings() {
         </div>
 
         {form.scheduler_provider === "buffer" && (
-          <div>
-            <Label className="text-xs text-white/60">Buffer access token</Label>
-            <Input type="password" value={form.buffer_api_key} onChange={(e) => update("buffer_api_key", e.target.value)} className="rounded-none bg-transparent mt-1 font-mono" data-testid="input-buffer" />
-            <a href="https://publish.buffer.com/developers/apps" target="_blank" rel="noreferrer" className="text-[11px] text-cyber inline-flex items-center gap-1 mt-1 hover:underline">
-              Get a token <ExternalLink size={10} />
-            </a>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-xs text-white/60">Buffer personal access token</Label>
+              <Input type="password" value={form.buffer_api_key || ""} onChange={(e) => update("buffer_api_key", e.target.value)} className="rounded-none bg-transparent mt-1 font-mono" data-testid="input-buffer" />
+              <a href="https://publish.buffer.com/settings/api" target="_blank" rel="noreferrer" className="text-[11px] text-cyber inline-flex items-center gap-1 mt-1 hover:underline">
+                Generate a token <ExternalLink size={10} />
+              </a>
+            </div>
+            <div className="flex gap-2 items-center">
+              <Button onClick={syncBuffer} disabled={syncing || !form.buffer_api_key} className="bg-cyber text-black hover:bg-yellow-400 rounded-none font-semibold" data-testid="btn-buffer-sync">
+                {syncing ? <><Loader2 size={14} className="mr-2 animate-spin" /> Syncing…</> : <><RefreshCcw size={14} className="mr-2" /> Sync past posts + fingerprint voice</>}
+              </Button>
+              {lastSync && (
+                <span className="text-[11px] font-mono text-white/50">last sync: {new Date(lastSync).toLocaleString()}</span>
+              )}
+            </div>
+            {channels.length > 0 && (
+              <div className="hairline p-3">
+                <div className="text-[10px] font-mono text-white/40 tracking-widest mb-2">CONNECTED CHANNELS</div>
+                <div className="flex flex-wrap gap-2">
+                  {channels.map((c) => (
+                    <div key={c.id} className="flex items-center gap-2 px-2 py-1 border border-white/10">
+                      <span className="text-[10px] font-mono text-cyber uppercase">{c.service}</span>
+                      <span className="text-xs text-white/80">{c.name}</span>
+                      <CheckCircle2 size={12} className="text-emerald-400" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
         {form.scheduler_provider === "publer" && (
           <div>
             <Label className="text-xs text-white/60">Publer API key</Label>
-            <Input type="password" value={form.publer_api_key} onChange={(e) => update("publer_api_key", e.target.value)} className="rounded-none bg-transparent mt-1 font-mono" data-testid="input-publer" />
+            <Input type="password" value={form.publer_api_key || ""} onChange={(e) => update("publer_api_key", e.target.value)} className="rounded-none bg-transparent mt-1 font-mono" data-testid="input-publer" />
             <a href="https://app.publer.io/settings/integrations" target="_blank" rel="noreferrer" className="text-[11px] text-cyber inline-flex items-center gap-1 mt-1 hover:underline">
               Grab your Publer API key <ExternalLink size={10} />
             </a>

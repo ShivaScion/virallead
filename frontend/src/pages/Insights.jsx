@@ -3,9 +3,9 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { listPosts, refreshMetrics, strategyNext } from "@/lib/api";
+import { listPosts, refreshMetrics, strategyNext, bufferAnalytics } from "@/lib/api";
 import { toast } from "sonner";
-import { Loader2, RefreshCcw, Target } from "lucide-react";
+import { Loader2, RefreshCcw, Target, TrendingUp } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, CartesianGrid, Tooltip } from "recharts";
 
 export default function Insights() {
@@ -15,6 +15,8 @@ export default function Insights() {
   const [urls, setUrls] = useState({});
   const [strategy, setStrategy] = useState(null);
   const [stratLoading, setStratLoading] = useState(false);
+  const [bufAnalytics, setBufAnalytics] = useState(null);
+  const [bufLoading, setBufLoading] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -22,7 +24,15 @@ export default function Insights() {
       .then((all) => setPosts(all.filter((p) => ["approved", "scheduled", "published", "draft"].includes(p.status))))
       .finally(() => setLoading(false));
   };
-  useEffect(load, []);
+  useEffect(() => {
+    load();
+    // auto-fetch Buffer analytics
+    setBufLoading(true);
+    bufferAnalytics(30)
+      .then(setBufAnalytics)
+      .catch(() => {})
+      .finally(() => setBufLoading(false));
+  }, []);
 
   const refresh = async (id) => {
     setRunning((r) => ({ ...r, [id]: true }));
@@ -89,11 +99,39 @@ export default function Insights() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {["likes", "comments", "shares", "impressions"].map((k) => (
           <Card key={k} className="tech-card rounded-none p-4" data-testid={`total-${k}`}>
-            <div className="text-[10px] font-mono text-white/40 tracking-widest">TOTAL {k.toUpperCase()}</div>
+            <div className="text-[10px] font-mono text-white/40 tracking-widest">EST. {k.toUpperCase()}</div>
             <div className="font-mono text-3xl font-extrabold text-cyber mt-1">{totals[k]}</div>
           </Card>
         ))}
       </div>
+
+      {(bufAnalytics?.entries?.length > 0 || bufLoading || bufAnalytics?.note) && (
+        <Card className="tech-card rounded-none p-5" data-testid="buffer-analytics-card">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <div className="text-[10px] font-mono text-cyber tracking-widest">// BUFFER · REAL METRICS (LAST 30D)</div>
+              <div className="text-xs text-white/50 font-mono mt-1">Pulled straight from Buffer Insights.</div>
+            </div>
+            <TrendingUp size={16} className="text-cyber" />
+          </div>
+          {bufLoading ? (
+            <div className="text-white/40 font-mono text-sm">Loading Buffer…</div>
+          ) : bufAnalytics?.note ? (
+            <div className="text-xs text-yellow-500 font-mono">{bufAnalytics.note}</div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              {bufAnalytics.entries.map((e) => (
+                <div key={e.name} className="hairline p-3">
+                  <div className="text-[9px] font-mono text-white/40 tracking-widest">{e.name.toUpperCase()}</div>
+                  <div className="font-mono text-xl font-extrabold text-cyber mt-1">
+                    {e.unit === "percentage" ? `${e.value}%` : e.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
 
       {chartData.length > 0 && (
         <Card className="tech-card rounded-none p-5" data-testid="chart-card">
