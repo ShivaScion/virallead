@@ -1,0 +1,107 @@
+{
+  "project_name": "ViralLead Automator",
+  "theme_strategy": {
+    "mode": "dark",
+    "archetype": "ELECTRIC & NEON / SWISS TECHNICAL",
+    "vibe": "Command-center, high-powered, relentless, precise."
+  },
+  "typography": {
+    "headings": {
+      "family": "Manrope, sans-serif",
+      "weights": ["300", "800"],
+      "classes": "font-sans tracking-tight",
+      "instructions": "Use font-light for elegant headers, and font-extrabold for high-impact titles. Never use generic Inter."
+    },
+    "body": {
+      "family": "IBM Plex Sans, sans-serif",
+      "classes": "font-sans tracking-normal leading-relaxed"
+    },
+    "mono": {
+      "family": "JetBrains Mono, monospace",
+      "classes": "font-mono tracking-tight",
+      "instructions": "Use for raw data, virality scores, lead emails, and code snippets."
+    }
+  },
+  "colors": {
+    "background": "#050505",
+    "foreground": "#FFFFFF",
+    "card": "#0A0A0A",
+    "card_foreground": "#FFFFFF",
+    "popover": "#0A0A0A",
+    "popover_foreground": "#FFFFFF",
+    "primary": "#FFD700",
+    "primary_foreground": "#000000",
+    "secondary": "#3B82F6",
+    "secondary_foreground": "#FFFFFF",
+    "muted": "#1F1F2E",
+    "muted_foreground": "#8F8F9D",
+    "accent": "#141414",
+    "accent_foreground": "#FFFFFF",
+    "destructive": "#EF4444",
+    "destructive_foreground": "#FFFFFF",
+    "border": "#1F1F2E",
+    "input": "#1F1F2E",
+    "ring": "#FFD700"
+  },
+  "layouts_and_grids": {
+    "dashboard_mode": "High Density Grid (Mode B). grid-cols-1 md:grid-cols-3 lg:grid-cols-4. Tight gaps (gap-4 or gap-6).",
+    "alignment": "Optical alignment over geometrical. Left-align dense data.",
+    "spacing": "Generous on containers (p-6, p-8). Tight within widgets (p-3, p-4) to maximize data density.",
+    "borders": "Use border-collapse techniques or border-r border-b on grid items to expose the grid skeleton."
+  },
+  "surfaces_and_micro_themes": {
+    "global": "Grid Borders (The Technical Look). Expose the skeleton. The app should feel like a high-density machine.",
+    "cards": "Flat solid background, 1px hard border, absolutely NO soft shadows. Use sharp inner contrasts.",
+    "headers": "Crystal Glassmorphism: bg-black/60 backdrop-blur-xl border-b border-white/10. Must have 1px delicate inner stroke.",
+    "inputs": "Flat, bg-transparent, border-border, focus:border-primary focus:ring-1 focus:ring-primary."
+  },
+  "component_strategy": {
+    "buttons": "Sharp edges (rounded-none or rounded-sm). High contrast text. Kinetic hover states (e.g. slight rightward translation on hover for arrows).",
+    "tables": "Shadcn Table. Monospaced font for data columns. High-contrast hover states on rows.",
+    "forms": "Shadcn UI forms heavily customized. No native inputs. Sharp edges, clear focus states.",
+    "charts": "Recharts wrapped in Shadcn chart UI. Use primary and secondary colors.",
+    "toast": "Use Sonner (`/app/frontend/src/components/ui/sonner.jsx`). Dark theme out of the box."
+  },
+  "motion_and_interactions": {
+    "hover_states": "All interactive elements MUST have explicitly set hover colors. Never rely on inheritance.",
+    "transitions": "Specific transitions ONLY. transition-colors duration-200, transition-transform. NEVER use transition-all.",
+    "lists": "Staggered entrance animations for leads and generated posts."
+  },
+  "images_and_media": {
+    "rules": "No placeholder URLs. Use provided images. Images should have a subtle greyscale or high-contrast filter to fit the dark tech theme if possible.",
+    "urls": {
+      "leads_avatars": [
+        "https://images.unsplash.com/photo-1623366302587-b38b1ddaefd9",
+        "https://images.pexels.com/photos/29995570/pexels-photo-29995570.jpeg"
+      ],
+      "onboarding_background": "https://images.unsplash.com/photo-1644088379091-d574269d422f",
+      "market_research_visual": "https://images.pexels.com/photos/10325707/pexels-photo-10325707.png"
+    }
+  },
+  "accessibility": {
+    "contrast": "Text must meet APCA/WCAG standards. Use pure white for primary text, muted_foreground for secondary.",
+    "focus": "All focusable elements must have focus:ring-2 focus:ring-primary focus:outline-none.",
+    "testing": "All interactive and key informational elements MUST include a data-testid attribute (e.g., data-testid='generate-post-btn')."
+  },
+  "universal_guidelines": [
+    "NEVER use generic centered layouts. Asymmetry creates interest.",
+    "NEVER use AI assistant emoji characters like 🤖🧠💭💡.",
+    "Always use modern button styles (sharp or pill) with interaction animations.",
+    "Layered design elements with z-index hierarchy.",
+    "Ensure 'data-testid' is present on all interactive elements.",
+    "DO NOT use completely transparent backgrounds in headers or dropdowns. ALWAYS use solid or glassmorphism backgrounds to maintain readability.",
+    "Do not add global text-align: center to the app.",
+    "When displaying virality score, use mono font and color code."
+  ],
+  "instructions_to_main_agent": [
+    "Update tailwind.config.js to include the exact colors provided in this JSON.",
+    "Import Manrope, IBM Plex Sans, and JetBrains Mono from Google Fonts in index.css.",
+    "Update CSS variables in index.css to match the dark theme colors.",
+    "Use Phosphor Icons (@phosphor-icons/react) for dense dashboards and developer tools.",
+    "Build the specific views: Onboarding, Leads Dashboard, Market Research, AI Post Generator, Insights, and Email Composer.",
+    "Ensure all HTML/JSX elements have the required 'data-testid' attributes.",
+    "Implement Sonner for toast notifications.",
+    "Never use native inputs, select, or datepicker. Only use customized Shadcn UI components.",
+    "Do not create .tsx files, use .jsx instead since the project is JavaScript based."
+  ]
+}
